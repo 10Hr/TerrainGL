@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terrain WEBGL</title>
+    <style>
+        body, html {
+            margin: 0;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        canvas {
+            border: 1px solid black;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="glCanvas" width="1200" height="800"></canvas>
+    <button id="zoomInButton">Zoom In</button>
+    <script type="module">
+        class TerrainType {
+            constructor(minHeight, maxHeight, minColor, maxColor, lerpAdjustment = 0) {
+                this.minHeight = minHeight;
+                this.maxHeight = maxHeight;
+                this.minColor = minColor;
+                this.maxColor = maxColor;
+                this.lerpAdjustment = lerpAdjustment;
+            }
+        }
+
+        import "https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.2.0/p5.min.js";
+
+        let pixelList = [];
+        let sunPos = [1.0, 1.0, 1.0];  // Initial sun position
+
+        function initWebGL(canvas) {
+            const gl = canvas.getContext('webgl');
+            if (!gl) {
+                console.error('WebGL not supported');
+                return;
+            }
+            return gl;
+        }
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('Shader compile failed:', gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(gl, vertexShaderSource, fragmentShaderSource) {
+            const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+            const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
+            const program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Program link failed:', gl.getProgramInfoLog(program));
+                gl.deleteProgram(program);
+                return null;
+            }
+            gl.useProgram(program);
+            return program;
+        }
+
+        function drawAllPixels(gl, program, positions, colors, heights) {
+            gl.clear(gl.COLOR_BUFFER_BIT);
+
+            const positionAttributeLocation = gl.getAttribLocation(program, 'a_position');
+            const positionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+
+            gl.enableVertexAttribArray(positionAttributeLocation);
+            gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
+
+            const colorAttributeLocation = gl.getAttribLocation(program, 'a_color');
+            const colorBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+
+            gl.enableVertexAttribArray(colorAttributeLocation);
+            gl.vertexAttribPointer(colorAttributeLocation, 4, gl.FLOAT, false, 0, 0);
+
+            const heightAttributeLocation = gl.getAttribLocation(program, 'a_height');
+            const heightBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, heightBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(heights), gl.STATIC_DRAW);
+
+            gl.enableVertexAttribArray(heightAttributeLocation);
+            gl.vertexAttribPointer(heightAttributeLocation, 1, gl.FLOAT, false, 0, 0);
+
+            const sunPosLocation = gl.getUniformLocation(program, 'u_sunPos');
+            gl.uniform3fv(sunPosLocation, sunPos);
+
+            gl.drawArrays(gl.POINTS, 0, positions.length / 2);
+        }
+
+        const canvas = document.getElementById('glCanvas');
+        const gl = initWebGL(canvas);
+
+        let sizeANDspacer = 1.5;
+
+        const vertexShaderSource = `
+            attribute vec2 a_position;
+            attribute vec4 a_color;
+            attribute float a_height;
+            varying vec4 v_color;
+            varying vec2 v_position;
+            varying float v_height;
+            void main() {
+                gl_PointSize = ${sizeANDspacer};
+                gl_Position = vec4(a_position, 0, 1);
+                v_position = a_position;
+                v_color = a_color;
+                v_height = a_height;
+            }
+        `;
+
+        const fragmentShaderSource = `
+            precision mediump float;
+            varying vec4 v_color;
+            varying vec2 v_position;
+            varying float v_height;
+
+            uniform sampler2D colour;
+            uniform sampler2D height;
+            varying vec2 pos;
+
+            uniform vec3 u_sunPos;
+
+            const float shadowBrightness = 0.5;
+            const float STEPS = 200.0;
+
+            void main() {
+
+                vec3 p = vec3(v_position, v_height);
+                vec3 stepDir = (u_sunPos - p) / STEPS;
+
+                float inShadow = 0.0;
+                for(float i = 0.0; i < STEPS; i++) {
+                    p += stepDir;
+                    if (p.z > 1.0) break;
+                    if (v_height > p.z) {
+                        inShadow = 1.0;
+                        break;
+                    }
+                }
+
+                vec4 shadowCol = vec4(v_color.rgb * shadowBrightness, v_color.a);
+                gl_FragColor = vec4(v_color.rgb, v_color.a);
+            }
+        `;
+
+        const program = createProgram(gl, vertexShaderSource, fragmentShaderSource);
+
+        gl.clearColor(1, 1, 1, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        let positions = [];
+        let colors = [];
+        let heights = [];
+        let zoomfactor = 100;
+
+        let myP5 = new p5((p) => { 
+            p.setup = function() { 
+                p.noCanvas();
+                p.noiseSeed(357943232);
+            };
+        });
+
+        let waterTerrain = new TerrainType(0.2, 0.4, myP5.color(30, 176, 251), myP5.color(40, 255, 255));
+        let sandTerrain = new TerrainType(0.4, 0.5, myP5.color(215, 192, 158), myP5.color(255, 246, 193), 0.3);
+        let grassTerrain = new TerrainType(0.5, 0.7, myP5.color(2, 166, 155), myP5.color(118, 239, 124));
+        let treesTerrain = new TerrainType(0.7, 0.75, myP5.color(22, 181, 141), myP5.color(10, 145, 113), -0.5);
+
+        myP5.noiseDetail(11, .5);
+
+        function animate() {
+
+            for (let i = 0; i <= canvas.width / sizeANDspacer; i++) {
+                for (let j = 0; j <= canvas.height / sizeANDspacer; j++) {
+                    const x = (i * sizeANDspacer / canvas.width) * 2 - 1;
+                    const y = (j * sizeANDspacer / canvas.height) * -2 + 1;
+                    positions.push(x, y);
+                    
+                    let noiseValue = myP5.noise(i / zoomfactor, j / zoomfactor);
+                    heights.push(noiseValue);  // Store height for shadows
+
+                    let terrainColor;
+                    if (noiseValue < 0.4) {
+                        terrainColor = getTerrainColor(noiseValue, waterTerrain);
+                    } else if (noiseValue < 0.5) {
+                        terrainColor = getTerrainColor(noiseValue, sandTerrain);
+                    } else if (noiseValue < 0.7) {
+                        terrainColor = getTerrainColor(noiseValue, grassTerrain);
+                    } else {
+                        terrainColor = getTerrainColor(noiseValue, treesTerrain);
+                    }
+
+                    let r = myP5.red(terrainColor) / 255;
+                    let g = myP5.green(terrainColor) / 255;
+                    let b = myP5.blue(terrainColor) / 255;
+                    colors.push(r, g, b, 1);
+                }
+            }
+            drawAllPixels(gl, program, positions, colors, heights);
+        }
+
+        function getTerrainColor(noiseValue, mapType) {
+            const normalized = normalize(noiseValue, mapType.maxHeight, mapType.minHeight);
+            return myP5.lerpColor(mapType.minColor, mapType.maxColor, normalized + mapType.lerpAdjustment);
+        }
+
+        function normalize(value, max, min) {
+            if (value > max) return 1;
+            if (value < min) return 0;
+            return (value - min) / (max - min);
+        }
+
+        animate();
+
+        function zoomIN() {
+            zoomfactor -= 1;
+            positions = [];
+            heights = [];
+            colors = [];
+            animate();
+            requestAnimationFrame(zoomIN);
+        }
+        document.getElementById('zoomInButton').addEventListener('click', zoomIN);
+        // function handleWheel(event) {
+        //     const delta = Math.sign(event.deltaY); // Determine scroll direction
+        //     zoomFactor *= (delta < 0) ? 0.5 : 2; // Zoom in if scrolling up, zoom out if scrolling down
+        //     positions = [];
+        //     heights = [];
+        //     colors = [];
+        //     //animate();
+        //     animate(); // Redraw pixels with new zoom level
+        // }
+
+
+        // Update the sun position based on mouse movement
+        // canvas.addEventListener('mousemove', (event) => {
+        //     const rect = canvas.getBoundingClientRect();
+        //     const mouseX = event.clientX - rect.left;
+        //     const mouseY = event.clientY - rect.top;
+
+        //     // Convert to normalized device coordinates (-1 to 1)
+        //     sunPos[0] = (mouseX / canvas.width) * 2 - 1;  // X coordinate
+        //     sunPos[1] = (mouseY / canvas.height) * -2 + 1; // Y coordinate
+        //     sunPos[2] = 1.0;  // Fixed Z coordinate (you can change this)
+        //     //console.log(heights);
+        //     drawAllPixels(gl, program, positions, colors, heights);
+        // });
+
+    </script>
+</body>
+</html>
